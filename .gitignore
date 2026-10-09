@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+sent_history.json
+*.log
+.DS_Store

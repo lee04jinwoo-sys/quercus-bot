@@ -1,0 +1,19 @@
+[Unit]
+Description=U of T Quercus Telegram Alert Bot Daemon
+After=network.target
+
+[Service]
+Type=simple
+# User can be ubuntu or opc depending on your OCI AMI (change accordingly)
+User=ubuntu
+WorkingDirectory=/home/ubuntu/quercus-bot
+ExecStart=/home/ubuntu/.local/bin/uv run quercus-bot
+Restart=always
+RestartSec=15
+EnvironmentFile=/home/ubuntu/quercus-bot/.env
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
