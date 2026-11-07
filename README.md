@@ -1,70 +1,79 @@
-# 🎓 U of T Quercus Telegram Alert Bot
+# Quercus Telegram Alert Bot
 
-토론토 대학교(U of T) Canvas LMS(**Quercus**)의 공지사항, 미제출 과제 마감, 성적 발표, 새 강의 자료를 30분 주기로 모니터링하여 **텔레그램으로 자동 발송하는 자율 알림 봇**입니다.
+[![tests](https://github.com/lee04jinwoo-sys/quercus-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/lee04jinwoo-sys/quercus-bot/actions/workflows/tests.yml)
 
----
+A small always-on daemon that polls the University of Toronto's Canvas LMS (**Quercus**) every 30 minutes and pushes what changed to Telegram: new announcements, approaching assignment deadlines, newly published grades, and newly uploaded course files.
 
-## 🚀 주요 기능
+(한국어: U of T Quercus의 공지·마감·성적·강의자료 변경을 30분마다 확인해 텔레그램으로 알려주는 봇입니다.)
 
-1. **📢 새 공지사항 실시간 감지**: 휴강, 게릴라 시험 공지, 강의실 변경 등 긴급 공지 즉시 전송
-2. **⏰ 미제출 과제 마감 카운트다운**: `D-3`, `D-1`, `D-Day(12시간 전/마감 직전)` 미제출 과제만 자동 리마인드
-3. **🎉 성적 발표 알림**: 퀴즈, 랩, 시험 채점 완료 즉시 점수 및 피드백 알림
-4. **📁 새 수업 자료 등록 알림**: 강의 슬라이드, 튜토리얼 솔루션 새 파일 업로드 감지
-5. **🛡️ 스마트 중복 방지**: `sent_history.json` 상태 저장소를 통해 이미 발송된 항목 재발송 차단
+## What it does
 
----
+| Alert | Trigger |
+|---|---|
+| Announcement | A new announcement ID appears in any active course |
+| Deadline | An **unsubmitted** assignment enters the D-3, D-1, 12h-left or final-3.5h window; each window fires once per assignment |
+| Grade | An assignment gets a score for the first time |
+| File | A new file ID appears in a course's Files tab (a hidden Files tab, HTTP 403, is skipped) |
 
-## 💻 로컬 설치 및 테스트
+The first run only indexes existing items silently, so you are not flooded with old content.
+
+## Design notes
+
+- **State** lives in `sent_history.json` (written atomically via a temp file) so restarts never resend alerts.
+- **A failed Telegram send does not mark the item as sent.** The alert is retried on the next poll. (An earlier version marked announcements, grades and files as sent even when delivery failed, which silently dropped them.)
+- **API errors are not "no news".** The client raises `QuercusAPIError` instead of returning an empty list. A failed poll never completes the initial sync and never updates `last_check_at`.
+- **Expired token** (HTTP 401) sends one Telegram message asking you to renew it, not one per poll, and re-arms after the API recovers.
+- Telegram messages HTML-escape all course-supplied text.
+
+## Setup
 
 ```bash
-# 1. 의존성 설치 (uv)
+cp .env.example .env     # QUERCUS_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 uv sync
-
-# 2. 텔레그램 연동 테스트 메시지 발송
-uv run quercus-bot --test-msg
-
-# 3. 1회 단발 검사 (초기 인덱싱)
-uv run quercus-bot --once
-
-# 4. 상시 데몬 모드 실행 (30분 주기)
-uv run quercus-bot
+uv run quercus-bot --test-msg   # verify Telegram wiring
+uv run quercus-bot --once       # one poll (first run = silent index)
+uv run quercus-bot --dry-run --once
+uv run quercus-bot              # daemon, POLL_INTERVAL_SECONDS (default 1800)
 ```
 
----
+The token is a Canvas personal access token (Quercus > Account > Settings > New Access Token). `.env` and `sent_history.json` are git-ignored.
 
-## ☁️ 오라클 클라우드(OCI) 3단계 배포 가이드
+### Running 24/7 with systemd
 
-### 1단계: OCI 인스턴스에 코드 복사 및 .env 세팅
+`quercus-bot.service` is a ready unit file. Adjust `User` and paths, then:
+
 ```bash
-# 서버 접속 후 디렉토리 이동
-git clone <your-repo-url> quercus-bot
-# 또는 scp로 전송:
-# scp -r ~/Desktop/Projects/quercus-bot ubuntu@<OCI_IP>:~/quercus-bot
-
-cd ~/quercus-bot
-cp .env.example .env
-nano .env   # QUERCUS_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID 확인
-chmod 600 .env
-```
-
-### 2단계: uv 동기화 및 1회 테스트
-```bash
-uv sync
-uv run quercus-bot --test-msg
-uv run quercus-bot --once
-```
-
-### 3단계: systemd 서비스 등록 (24/7 상시 가동)
-```bash
-# 서비스 파일 복사 (User가 opc인 경우 User/경로 수정)
 sudo cp quercus-bot.service /etc/systemd/system/
-
-# 서비스 활성화 및 시작
 sudo systemctl daemon-reload
-sudo systemctl enable quercus-bot
-sudo systemctl start quercus-bot
-
-# 상태 및 실시간 로그 확인
-sudo systemctl status quercus-bot
+sudo systemctl enable --now quercus-bot
 sudo journalctl -u quercus-bot -f
+```
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+```
+
+Tests use a fake client for `check_once()` and `respx` for the HTTP layer, so they never touch Quercus or Telegram. They cover the deadline windows, dedupe, delivery-failure retry, initial-sync safety and token-expiry handling.
+
+## Limitations
+
+- Polling, not push: alerts can lag by up to one poll interval.
+- Grade *changes* after the first score are not reported.
+- Only the first page of results is fetched (30 announcements, 50 assignments, 15 files per course).
+- Course display names are an alias table in `daemon.py`; other courses fall back to their Canvas names.
+- Single user, single Telegram chat.
+
+## Layout
+
+```
+src/quercus_bot/
+  client.py    Canvas REST client (QuercusAPIError / QuercusAuthError)
+  daemon.py    check_once() polling logic and the run loop
+  notifier.py  Telegram sender and message formatting
+  storage.py   sent_history.json persistence
+  models.py    Pydantic models
+tests/         pytest suite
 ```
