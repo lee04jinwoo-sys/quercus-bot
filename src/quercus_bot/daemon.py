@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from rich.logging import RichHandler
 
-from quercus_bot.client import QuercusClient
+from quercus_bot.client import QuercusAPIError, QuercusAuthError, QuercusClient
 from quercus_bot.models import Course, HistoryStore
 from quercus_bot.notifier import (
     format_announcement_message,
@@ -45,7 +45,32 @@ def get_clean_course_name(course: Course) -> str:
 
 
 async def check_once(client: QuercusClient, store: HistoryStore, dry_run: bool = False) -> int:
-    """Execute a single polling iteration across all active courses."""
+    """Execute one polling iteration; API failures are reported, never read as "no news"."""
+    try:
+        alerts = await _poll(client, store, dry_run)
+    except QuercusAuthError as exc:
+        logger.error(f"Quercus rejected the API token: {exc}")
+        if not store.auth_alert_sent and not dry_run:
+            sent = await send_telegram_message(
+                "🔑 <b>[UofT Quercus Bot] API 토큰이 거부되었습니다</b>\n\n"
+                "Quercus 토큰이 만료되었거나 폐기되었습니다. "
+                "새 토큰을 발급해 서버의 .env를 갱신해 주세요. 그때까지 알림이 오지 않습니다."
+            )
+            store.auth_alert_sent = sent
+        save_history(store)
+        return 0
+    except QuercusAPIError as exc:
+        logger.error(f"Quercus check failed, will retry next poll: {exc}")
+        save_history(store)
+        return 0
+
+    store.auth_alert_sent = False
+    save_history(store)
+    return alerts
+
+
+async def _poll(client: QuercusClient, store: HistoryStore, dry_run: bool) -> int:
+    """Run the checks for all active courses. Raises QuercusAPIError on API failure."""
     now = datetime.now(timezone.utc)
     logger.info(f"Starting Quercus check iteration at {now.isoformat()} (Initialized: {store.initialized})...")
     alerts_dispatched = 0
@@ -71,9 +96,9 @@ async def check_once(client: QuercusClient, store: HistoryStore, dry_run: bool =
 
             if store.initialized and not dry_run:
                 msg = format_announcement_message(cname, ann)
-                success = await send_telegram_message(msg)
-                if success:
-                    alerts_dispatched += 1
+                if not await send_telegram_message(msg):
+                    continue  # leave unmarked so the next poll retries
+                alerts_dispatched += 1
             else:
                 logger.info(f"[Initial Sync/DryRun] Cached announcement: {ann.title}")
 
@@ -95,9 +120,9 @@ async def check_once(client: QuercusClient, store: HistoryStore, dry_run: bool =
                     # New grade recorded
                     if store.initialized and not dry_run:
                         msg = format_grade_message(cname, a, sub.score)
-                        success = await send_telegram_message(msg)
-                        if success:
-                            alerts_dispatched += 1
+                        if not await send_telegram_message(msg):
+                            continue  # retry next poll
+                        alerts_dispatched += 1
                     else:
                         logger.info(f"[Initial Sync/DryRun] Cached grade: {a.name} -> {sub.score}")
                     store.sent_grades[a_key] = sub.score
@@ -132,9 +157,9 @@ async def check_once(client: QuercusClient, store: HistoryStore, dry_run: bool =
             if f.id not in sent_files_set:
                 if store.initialized and not dry_run:
                     msg = format_new_file_message(cname, f)
-                    success = await send_telegram_message(msg)
-                    if success:
-                        alerts_dispatched += 1
+                    if not await send_telegram_message(msg):
+                        continue  # retry next poll
+                    alerts_dispatched += 1
                 else:
                     logger.info(f"[Initial Sync/DryRun] Cached file: {f.display_name}")
                 sent_files_set.add(f.id)
@@ -146,7 +171,6 @@ async def check_once(client: QuercusClient, store: HistoryStore, dry_run: bool =
         logger.info("Initial sync complete. All past announcements, grades, and files have been indexed.")
 
     store.last_check_at = now
-    save_history(store)
     logger.info(f"Check iteration completed. Total alerts sent: {alerts_dispatched}")
     return alerts_dispatched
 

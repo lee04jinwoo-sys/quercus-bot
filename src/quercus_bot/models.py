@@ -53,4 +53,5 @@ class HistoryStore(BaseModel):
     sent_grades: dict[str, Optional[float]] = Field(default_factory=dict)
     sent_due_alerts: dict[str, list[str]] = Field(default_factory=dict)
     sent_files: list[int] = Field(default_factory=list)
+    auth_alert_sent: bool = False
     last_check_at: Optional[datetime] = None
